@@ -122,7 +122,7 @@ export class ResultModal extends Modal {
   }
 }
 
-export const CHAT_VIEW = "local-ai-chat";
+export const CHAT_VIEW = "loom-chat";
 
 // What the chat needs from the plugin: live settings plus a persisted conversation.
 export interface ChatHost {
@@ -149,7 +149,7 @@ export class ChatView extends ItemView {
   }
 
   getViewType() { return CHAT_VIEW; }
-  getDisplayText() { return "Local AI chat"; }
+  getDisplayText() { return "Loom chat"; }
   getIcon() { return "message-square"; }
 
   async onOpen() {
@@ -158,7 +158,7 @@ export class ChatView extends ItemView {
     root.addClass("lai-chat");
 
     const header = root.createDiv({ cls: "lai-header" });
-    header.createSpan({ cls: "lai-title", text: "Local AI" });
+    header.createSpan({ cls: "lai-title", text: "Loom" });
     const models = header.createEl("select");
     void this.fillModels(models);
     models.onchange = () => {
@@ -238,7 +238,7 @@ export class ChatView extends ItemView {
     const { history } = this.host;
     if (!history.length) {
       const empty = this.log.createDiv({ cls: "lai-empty" });
-      empty.createEl("h3", { text: "Chat with your local model" });
+      empty.createEl("h3", { text: "Chat with your model" });
       empty.createDiv({ text: "Attach notes with the chips above, or just ask anything." });
       return;
     }
@@ -370,6 +370,7 @@ export class SetupModal extends Modal {
     });
 
     let endpoint: HTMLInputElement;
+    let providerNote: HTMLElement;
     new Setting(contentEl).setName("Provider").addDropdown((d) => {
       PROVIDERS.forEach((p) => d.addOption(p.id, p.label));
       d.addOption("custom", "Custom");
@@ -379,8 +380,10 @@ export class SetupModal extends Modal {
         if (!p) return;
         Object.assign(draft, { endpoint: p.endpoint, embedEndpoint: p.embedEndpoint, embedModel: p.embedModel });
         endpoint.value = p.endpoint;
+        providerNote.setText(p.note ?? "");
       });
     });
+    providerNote = contentEl.createEl("p", { cls: "setting-item-description" });
     new Setting(contentEl).setName("Endpoint").addText((t) => {
       endpoint = t.inputEl;
       t.setValue(draft.endpoint).onChange((v) => (draft.endpoint = v.trim()));
@@ -394,19 +397,25 @@ export class SetupModal extends Modal {
       });
 
     const modelSetting = new Setting(contentEl).setName("Model").setDesc("Press Test connection to load models.");
+    const setStatus = (text: string, state: "ok" | "error" | "" = "") => {
+      modelSetting.setDesc(text);
+      modelSetting.descEl.removeClasses(["lai-ok", "lai-error"]);
+      if (state) modelSetting.descEl.addClass(`lai-${state}`);
+    };
     const save = contentEl.createEl("button", { text: "Save", cls: "mod-cta" });
     save.disabled = true;
     new Setting(contentEl).addButton((b) =>
       b.setButtonText("Test connection").onClick(async () => {
-        modelSetting.setDesc("Connecting…");
+        setStatus("Connecting…");
         const found = await listModels(draft);
         if (!found?.length) {
-          modelSetting.setDesc("Could not reach the server (check the endpoint, API key and that it is running).");
+          setStatus("✗ Could not reach the server (check the endpoint, API key and that it is running).", "error");
+          save.disabled = true;
           return;
         }
         models = found;
         if (!models.includes(draft.model)) draft.model = models[0];
-        modelSetting.setDesc(`Connected. ${models.length} model${models.length === 1 ? "" : "s"} found.`);
+        setStatus(`✓ Connected. ${models.length} model${models.length === 1 ? "" : "s"} found.`, "ok");
         modelSetting.controlEl.empty();
         modelSetting.addDropdown((d) => {
           models.forEach((m) => d.addOption(m, m));
@@ -428,7 +437,7 @@ export class SetupModal extends Modal {
   }
 }
 
-export const RELATED_VIEW = "local-ai-related";
+export const RELATED_VIEW = "loom-related";
 
 // Side panel listing notes similar to the one you are editing.
 export class RelatedView extends ItemView {

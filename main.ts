@@ -60,7 +60,7 @@ export default class LocalAIPlugin extends Plugin {
         save: () => this.saveData(this.settings),
       }));
     this.registerView(RELATED_VIEW, (leaf) => new RelatedView(leaf, this.search));
-    this.addRibbonIcon("message-square", "Local AI chat", () => void this.openView(CHAT_VIEW));
+    this.addRibbonIcon("message-square", "Loom chat", () => void this.openView(CHAT_VIEW));
     this.initStatusBar();
 
     for (const action of BUILTIN) {
@@ -114,7 +114,7 @@ export default class LocalAIPlugin extends Plugin {
     this.registerEvent(
       this.app.workspace.on("editor-menu", (menu, editor) =>
         menu.addItem((item) =>
-          item.setTitle("Local AI: run action…").setIcon("sparkles").onClick(() => this.pickAction(editor)),
+          item.setTitle("Loom: run action…").setIcon("sparkles").onClick(() => this.pickAction(editor)),
         ),
       ),
     );
@@ -131,11 +131,11 @@ export default class LocalAIPlugin extends Plugin {
       el.appendText(` ${this.settings.model}`);
       el.toggleClass("is-up", up);
       el.toggleClass("is-down", !up);
-      el.setAttribute("aria-label", up ? "Local AI server is up. Click to switch model." : "Local AI server unreachable.");
+      el.setAttribute("aria-label", up ? "Loom server is up. Click to switch model." : "Loom server unreachable.");
     };
     el.onclick = async () => {
       const models = await listModels(this.settings);
-      if (!models) return void new Notice("Local AI server unreachable.");
+      if (!models) return void new Notice("Loom server unreachable.");
       new Picker(this.app, models, (m) => m, "Switch model…", async (m) => {
         this.settings.model = m;
         await this.saveData(this.settings);
@@ -183,7 +183,7 @@ export default class LocalAIPlugin extends Plugin {
     new SetupModal(this.app, this.settings, async (patch) => {
       Object.assign(this.settings, patch, { setupDone: true });
       await this.saveData(this.settings);
-      new Notice("Local AI connected.");
+      new Notice("Loom connected.");
     }).open();
   }
 
@@ -329,7 +329,7 @@ class SettingsTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Connection")
-      .setDesc("Guided setup for llama.cpp, Ollama, LM Studio, OpenAI or OpenRouter.")
+      .setDesc("Guided setup for llama.cpp, Ollama, LM Studio, OpenAI, Claude, DeepSeek, Grok, Groq, Mistral, Together or OpenRouter.")
       .addButton((b) => b.setButtonText("Run setup…").setCta().onClick(() => {
         new SetupModal(this.app, s, async (patch) => {
           Object.assign(s, patch, { setupDone: true });

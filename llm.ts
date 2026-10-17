@@ -94,7 +94,11 @@ export interface Provider {
   endpoint: string;
   embedEndpoint: string;
   embedModel: string;
+  note?: string;
 }
+
+// Hosted chat-only providers have no embeddings API, so "Ask your vault" keeps using a local embedding server.
+const LOCAL_EMBED = { embedEndpoint: "http://127.0.0.1:1234", embedModel: "text-embedding-nomic-embed-text-v1.5" };
 
 // All speak the OpenAI-compatible API; presets just fill in the endpoints.
 export const PROVIDERS: Provider[] = [
@@ -103,6 +107,12 @@ export const PROVIDERS: Provider[] = [
   { id: "lmstudio", label: "LM Studio", endpoint: "http://127.0.0.1:1234", embedEndpoint: "http://127.0.0.1:1234", embedModel: "text-embedding-nomic-embed-text-v1.5" },
   { id: "openai", label: "OpenAI", endpoint: "https://api.openai.com", embedEndpoint: "https://api.openai.com", embedModel: "text-embedding-3-small" },
   { id: "openrouter", label: "OpenRouter", endpoint: "https://openrouter.ai/api", embedEndpoint: "https://openrouter.ai/api", embedModel: "openai/text-embedding-3-small" },
+  { id: "anthropic", label: "Anthropic (Claude)", endpoint: "https://api.anthropic.com", ...LOCAL_EMBED, note: "Models like claude-sonnet-5-5. No embeddings API; uses the local embedding server." },
+  { id: "deepseek", label: "DeepSeek", endpoint: "https://api.deepseek.com", ...LOCAL_EMBED, note: "Models: deepseek-chat, deepseek-reasoner. No embeddings API." },
+  { id: "xai", label: "xAI (Grok)", endpoint: "https://api.x.ai", ...LOCAL_EMBED, note: "Grok models. No embeddings API." },
+  { id: "groq", label: "Groq", endpoint: "https://api.groq.com/openai", ...LOCAL_EMBED, note: "Fast hosted open models. No embeddings API." },
+  { id: "mistral", label: "Mistral", endpoint: "https://api.mistral.ai", embedEndpoint: "https://api.mistral.ai", embedModel: "mistral-embed" },
+  { id: "together", label: "Together AI", endpoint: "https://api.together.xyz", embedEndpoint: "https://api.together.xyz", embedModel: "togethercomputer/m2-bert-80M-8k-retrieval" },
 ];
 
 export async function listModels(s: Pick<LLMSettings, "endpoint" | "apiKey">): Promise<string[] | null> {

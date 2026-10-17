@@ -1,7 +1,8 @@
 .lai-chat { display:flex; flex-direction:column; height:100%; gap:var(--size-4-2); }
-.lai-header { display:flex; align-items:center; gap:var(--size-4-2); flex-wrap:wrap; }
-.lai-header .lai-title { font-weight:var(--font-semibold); flex:1; }
-.lai-header select { max-width:11em; }
+.lai-header { display:flex; align-items:center; gap:var(--size-4-2); }
+.lai-header .lai-title { font-weight:var(--font-semibold); flex:none; }
+.lai-header select { flex:1; min-width:0; }
+.lai-header button { flex:none; }
 .lai-ctx { display:flex; flex-wrap:wrap; gap:var(--size-4-1); align-items:center; font-size:var(--font-ui-smaller); }
 .lai-chip { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:var(--radius-xl);
   background:var(--background-modifier-hover); color:var(--text-muted); cursor:pointer; border:1px solid transparent; }
@@ -39,3 +40,5 @@
 .lai-related-item:hover { background:var(--background-modifier-hover); }
 .lai-related-name { font-weight:var(--font-medium); }
 .lai-related-meta { font-size:var(--font-ui-smaller); color:var(--text-faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.lai-ok { color:var(--color-green); }
+.lai-error { color:var(--color-red); }

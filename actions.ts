@@ -43,7 +43,7 @@ export const BUILTIN: Action[] = [
   { id: "links", name: "Suggest links to other notes", mode: "below",
     system: (app) =>
       "Pick up to 8 notes from the list that this text should link to. Reply with a markdown bullet list of [[wikilinks]] using only titles from the list." +
-      RULES + "\n\nNotes:\n" + app.vault.getMarkdownFiles().slice(0, 800).map((f) => f.basename).join("\n") },
+      RULES + "\n\nNotes:\n" + app.vault.getMarkdownFiles().filter((f) => f !== app.workspace.getActiveFile()).slice(0, 800).map((f) => f.basename).join("\n") },
 ];
 
 // Template variables available in custom actions and prompt-library notes.
