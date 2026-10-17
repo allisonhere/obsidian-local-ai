@@ -46,6 +46,16 @@ export const BUILTIN: Action[] = [
       RULES + "\n\nNotes:\n" + app.vault.getMarkdownFiles().slice(0, 800).map((f) => f.basename).join("\n") },
 ];
 
+// Template variables available in custom actions and prompt-library notes.
+export function expandVars(text: string, vars: Record<string, string>) {
+  let usedInput = false;
+  const out = text.replace(/\{\{(selection|note|title|date)\}\}/g, (_, k: string) => {
+    if (k === "selection" || k === "note") usedInput = true;
+    return vars[k];
+  });
+  return { text: out, usedInput };
+}
+
 export const ASK_NOTE: Action = {
   id: "ask", name: "Ask about this note", mode: "below",
   system: "Answer the user's question using only the note below. Be concise. Keep [[wikilinks]] and markdown formatting.",

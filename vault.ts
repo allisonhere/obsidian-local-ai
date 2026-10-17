@@ -1,4 +1,4 @@
-import { App, Notice } from "obsidian";
+import { App, Notice, TFile } from "obsidian";
 import { LLMSettings, Message, embed } from "./llm";
 
 interface Chunk { text: string; vec: number[] }
@@ -78,6 +78,21 @@ export class VaultSearch {
       progress.hide();
       await this.app.vault.adapter.write(this.path, JSON.stringify(index));
     }
+  }
+
+  // Notes most similar to `file`, by comparing its mean embedding against every other note's chunks.
+  async related(file: TFile, k = 8): Promise<{ path: string; score: number }[]> {
+    await this.update();
+    const { files } = await this.load();
+    const own = files[file.path]?.chunks;
+    if (!own?.length) return [];
+    const mean = own[0].vec.map((_, i) => own.reduce((sum, c) => sum + c.vec[i], 0) / own.length);
+    return Object.entries(files)
+      .filter(([path]) => path !== file.path)
+      .map(([path, f]) => ({ path, score: Math.max(...f.chunks.map((c) => cosine(mean, c.vec))) }))
+      .filter((r) => Number.isFinite(r.score))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, k);
   }
 
   async search(query: string, k = 6): Promise<{ path: string; text: string }[]> {

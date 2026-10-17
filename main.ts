@@ -3,25 +3,30 @@ import {
   Editor,
   Notice,
   Plugin,
+  normalizePath,
   PluginSettingTab,
   Setting,
   TFile,
 } from "obsidian";
-import { ASK_NOTE, Action, BUILTIN, LANGUAGES, RULES, translateTo } from "./actions";
+import { ASK_NOTE, Action, BUILTIN, LANGUAGES, RULES, expandVars, translateTo } from "./actions";
 import { LLMSettings, Message, listModels, streamChat } from "./llm";
-import { CHAT_VIEW, ChatView, Picker, PromptModal, ResultModal } from "./ui";
+import { CHAT_VIEW, ChatView, Picker, PromptModal, RELATED_VIEW, RelatedView, ResultModal, SetupModal } from "./ui";
 import { VaultSearch, askVault, digestMessages } from "./vault";
 
 interface Settings extends LLMSettings {
   // Stream results straight into the note instead of previewing them in a modal (undo with Ctrl+Z).
   applyDirectly: boolean;
   customActions: string;
+  // Vault folder whose notes are reusable prompts (note body = instruction).
+  promptFolder: string;
+  setupDone: boolean;
   // Persisted chat-panel conversation.
   chat: Message[];
 }
 
 const DEFAULTS: Settings = {
   endpoint: "http://127.0.0.1:8080",
+  apiKey: "",
   model: "qwen3.8-27b-ridge",
   thinking: false,
   temperature: 0.7,
@@ -30,6 +35,8 @@ const DEFAULTS: Settings = {
   embedModel: "text-embedding-nomic-embed-text-v1.5",
   applyDirectly: false,
   customActions: "",
+  promptFolder: "AI Prompts",
+  setupDone: false,
   chat: [],
 };
 
@@ -41,7 +48,9 @@ export default class LocalAIPlugin extends Plugin {
   private streaming: AbortController | null = null;
 
   async onload() {
-    this.settings = { ...DEFAULTS, ...(await this.loadData()) };
+    const saved = await this.loadData();
+    // Existing installs already have a working connection; only brand-new ones see the wizard.
+    this.settings = { ...DEFAULTS, ...saved, ...(saved && { setupDone: true }) };
     this.search = new VaultSearch(this.app, this.settings, this.manifest.dir!);
     this.addSettingTab(new SettingsTab(this.app, this));
     this.registerView(CHAT_VIEW, (leaf) =>
@@ -50,7 +59,8 @@ export default class LocalAIPlugin extends Plugin {
         history: this.settings.chat,
         save: () => this.saveData(this.settings),
       }));
-    this.addRibbonIcon("message-square", "Local AI chat", () => void this.openChat());
+    this.registerView(RELATED_VIEW, (leaf) => new RelatedView(leaf, this.search));
+    this.addRibbonIcon("message-square", "Local AI chat", () => void this.openView(CHAT_VIEW));
     this.initStatusBar();
 
     for (const action of BUILTIN) {
@@ -78,7 +88,11 @@ export default class LocalAIPlugin extends Plugin {
       name: "Stop generation",
       callback: () => this.streaming?.abort(),
     });
-    this.addCommand({ id: "chat", name: "Open chat", callback: () => void this.openChat() });
+    this.addCommand({ id: "chat", name: "Open chat", callback: () => void this.openView(CHAT_VIEW) });
+    this.addCommand({ id: "related", name: "Open related notes", callback: () => void this.openView(RELATED_VIEW) });
+    this.addCommand({ id: "setup", name: "Connect to a model…", callback: () => this.openSetup() });
+    this.addCommand({ id: "prompts", name: "Open prompt library", callback: () => void this.openPromptLibrary() });
+    this.app.workspace.onLayoutReady(() => { if (!this.settings.setupDone) this.openSetup(); });
     this.addCommand({
       id: "ask-vault",
       name: "Ask your vault",
@@ -111,7 +125,7 @@ export default class LocalAIPlugin extends Plugin {
     const el = this.addStatusBarItem();
     el.addClass("lai-status");
     const refresh = async () => {
-      const up = (await listModels(this.settings.endpoint)) !== null;
+      const up = (await listModels(this.settings)) !== null;
       el.empty();
       el.createSpan({ cls: "lai-dot", text: "●" });
       el.appendText(` ${this.settings.model}`);
@@ -120,7 +134,7 @@ export default class LocalAIPlugin extends Plugin {
       el.setAttribute("aria-label", up ? "Local AI server is up. Click to switch model." : "Local AI server unreachable.");
     };
     el.onclick = async () => {
-      const models = await listModels(this.settings.endpoint);
+      const models = await listModels(this.settings);
       if (!models) return void new Notice("Local AI server unreachable.");
       new Picker(this.app, models, (m) => m, "Switch model…", async (m) => {
         this.settings.model = m;
@@ -134,6 +148,43 @@ export default class LocalAIPlugin extends Plugin {
 
   onunload() {
     this.streaming?.abort();
+  }
+
+  // Prompt library: every note in the prompt folder is an action (body = instruction, optional `mode: below` frontmatter).
+  private async promptActions(): Promise<Action[]> {
+    const folder = normalizePath(this.settings.promptFolder) + "/";
+    const files = this.app.vault.getMarkdownFiles().filter((f) => f.path.startsWith(folder));
+    return Promise.all(files.map(async (f): Promise<Action> => {
+      const cache = this.app.metadataCache.getFileCache(f);
+      const raw = await this.app.vault.cachedRead(f);
+      return {
+        id: `prompt-${f.path}`,
+        name: f.basename,
+        mode: cache?.frontmatter?.mode === "below" ? "below" : "replace",
+        system: raw.slice(cache?.frontmatterPosition?.end.offset ?? 0).trim() + RULES,
+      };
+    }));
+  }
+
+  private async openPromptLibrary() {
+    const folder = normalizePath(this.settings.promptFolder);
+    if (!this.app.vault.getFolderByPath(folder)) await this.app.vault.createFolder(folder);
+    const example = `${folder}/Explain simply.md`;
+    if (!this.app.vault.getFileByPath(example) && !(await this.promptActions()).length) {
+      await this.app.vault.create(example,
+        "---\nmode: below\n---\nExplain the following to a beginner. The note is titled \"{{title}}\" (today is {{date}}).\n\n{{selection}}\n");
+    }
+    const first = this.app.vault.getMarkdownFiles().find((f) => f.path.startsWith(folder + "/"));
+    if (first) void this.app.workspace.getLeaf("tab").openFile(first);
+    new Notice(`Each note in "${folder}" is a prompt. Variables: {{selection}} {{note}} {{title}} {{date}}.`, 8000);
+  }
+
+  private openSetup() {
+    new SetupModal(this.app, this.settings, async (patch) => {
+      Object.assign(this.settings, patch, { setupDone: true });
+      await this.saveData(this.settings);
+      new Notice("Local AI connected.");
+    }).open();
   }
 
   // Custom actions live in settings as "Name: instruction" lines, so edits apply without a reload.
@@ -151,16 +202,17 @@ export default class LocalAIPlugin extends Plugin {
     return [...BUILTIN, ...custom];
   }
 
-  private pickAction(editor: Editor) {
-    new Picker(this.app, this.allActions(), (a) => a.name, "Run AI action…", (a) => this.run(editor, a)).open();
+  private async pickAction(editor: Editor) {
+    const actions = [...this.allActions(), ...(await this.promptActions())];
+    new Picker(this.app, actions, (a) => a.name, "Run AI action…", (a) => this.run(editor, a)).open();
   }
 
-  private async openChat() {
+  private async openView(type: string) {
     const { workspace } = this.app;
-    let leaf = workspace.getLeavesOfType(CHAT_VIEW)[0];
+    let leaf = workspace.getLeavesOfType(type)[0];
     if (!leaf) {
       leaf = workspace.getRightLeaf(false)!;
-      await leaf.setViewState({ type: CHAT_VIEW, active: true });
+      await leaf.setViewState({ type, active: true });
     }
     void workspace.revealLeaf(leaf);
   }
@@ -207,10 +259,19 @@ export default class LocalAIPlugin extends Plugin {
     const from = selection ? editor.getCursor("from") : { line: 0, ch: 0 };
     const to = selection ? editor.getCursor("to") : editor.offsetToPos(editor.getValue().length);
 
-    const system = typeof action.system === "function" ? action.system(this.app) : action.system;
+    const { text: system, usedInput } = expandVars(
+      typeof action.system === "function" ? action.system(this.app) : action.system,
+      {
+        selection: input,
+        note: editor.getValue(),
+        title: this.app.workspace.getActiveFile()?.basename ?? "",
+        date: new Date().toISOString().slice(0, 10),
+      },
+    );
+    // A template that embeds {{selection}}/{{note}} already carries the input.
     const messages: Message[] = question !== undefined
       ? [{ role: "system", content: `${system}\n\nNote:\n${input}` }, { role: "user", content: question }]
-      : [{ role: "system", content: system }, { role: "user", content: input }];
+      : [{ role: "system", content: system }, { role: "user", content: usedInput ? "Proceed." : input }];
 
     const format = (text: string) => {
       const out = action.wrap ? action.wrap(text) : text;
@@ -267,12 +328,31 @@ class SettingsTab extends PluginSettingTab {
     containerEl.empty();
 
     new Setting(containerEl)
+      .setName("Connection")
+      .setDesc("Guided setup for llama.cpp, Ollama, LM Studio, OpenAI or OpenRouter.")
+      .addButton((b) => b.setButtonText("Run setup…").setCta().onClick(() => {
+        new SetupModal(this.app, s, async (patch) => {
+          Object.assign(s, patch, { setupDone: true });
+          await save();
+          void this.display();
+        }).open();
+      }));
+
+    new Setting(containerEl)
       .setName("LLM endpoint")
-      .setDesc("OpenAI-compatible server (llama.cpp ridge).")
+      .setDesc("Any OpenAI-compatible server.")
       .addText((t) => t.setValue(s.endpoint).onChange(async (v) => { s.endpoint = v.trim(); await save(); }))
       .addButton((b) => b.setButtonText("Refresh models").onClick(() => this.display()));
 
-    const models = (await listModels(s.endpoint)) ?? [];
+    new Setting(containerEl)
+      .setName("API key")
+      .setDesc("Only for hosted providers.")
+      .addText((t) => {
+        t.inputEl.type = "password";
+        t.setValue(s.apiKey).onChange(async (v) => { s.apiKey = v.trim(); await save(); });
+      });
+
+    const models = (await listModels(s)) ?? [];
 
     const model = new Setting(containerEl).setName("Model");
     if (models.length) {
@@ -322,8 +402,13 @@ class SettingsTab extends PluginSettingTab {
       .addText((t) => t.setValue(s.embedModel).onChange(async (v) => { s.embedModel = v.trim(); await save(); }));
 
     new Setting(containerEl)
+      .setName("Prompt library folder")
+      .setDesc("Each note in this vault folder becomes an action. Run \"Open prompt library\" to create an example.")
+      .addText((t) => t.setValue(s.promptFolder).onChange(async (v) => { s.promptFolder = v.trim() || "AI Prompts"; await save(); }));
+
+    new Setting(containerEl)
       .setName("Custom actions")
-      .setDesc('One per line, as "Name: instruction". They appear under the "Run action…" command.')
+      .setDesc('One per line, as "Name: instruction". Variables: {{selection}} {{note}} {{title}} {{date}}.')
       .addTextArea((t) => {
         t.setPlaceholder("Explain like I'm five: Explain the text in very simple terms.")
           .setValue(s.customActions)

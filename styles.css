@@ -34,3 +34,8 @@
 .lai-status.is-up .lai-dot { color:var(--color-green); }
 .lai-status.is-down .lai-dot { color:var(--color-red); }
 .lai-wide { width:100%; }
+.lai-related { display:flex; flex-direction:column; gap:var(--size-4-2); height:100%; }
+.lai-related-item { padding:var(--size-4-2) var(--size-4-3); border-radius:var(--radius-m); cursor:pointer; background:var(--background-secondary); }
+.lai-related-item:hover { background:var(--background-modifier-hover); }
+.lai-related-name { font-weight:var(--font-medium); }
+.lai-related-meta { font-size:var(--font-ui-smaller); color:var(--text-faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }

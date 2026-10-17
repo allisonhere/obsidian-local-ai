@@ -1,5 +1,6 @@
-import { App, FuzzySuggestModal, ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, TFile, WorkspaceLeaf } from "obsidian";
-import { LLMSettings, Message, listModels, streamChat } from "./llm";
+import { App, FuzzySuggestModal, ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Setting, TFile, WorkspaceLeaf } from "obsidian";
+import { LLMSettings, Message, PROVIDERS, listModels, streamChat } from "./llm";
+import type { VaultSearch } from "./vault";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -198,7 +199,7 @@ export class ChatView extends ItemView {
 
   private async fillModels(select: HTMLSelectElement) {
     const current = this.host.settings.model;
-    const models = (await listModels(this.host.settings.endpoint)) ?? [];
+    const models = (await listModels(this.host.settings)) ?? [];
     if (!models.includes(current)) models.unshift(current);
     for (const m of models) select.createEl("option", { text: m, value: m });
     select.value = current;
@@ -349,5 +350,147 @@ export class ChatView extends ItemView {
     const body = history.map((m) => `**${m.role === "user" ? "You" : "AI"}:**\n\n${m.content}`).join("\n\n---\n\n");
     const file = await this.app.vault.create(`Chat ${stamp}.md`, body + "\n");
     void this.app.workspace.getLeaf("tab").openFile(file);
+  }
+}
+
+// First-run / reconnect wizard: pick a provider, test the connection, choose a model.
+export class SetupModal extends Modal {
+  constructor(app: App, private current: LLMSettings, private onSave: (patch: Partial<LLMSettings>) => void) {
+    super(app);
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    const draft = { ...this.current };
+    let models: string[] = [];
+    contentEl.createEl("h3", { text: "Connect to a model" });
+    contentEl.createEl("p", {
+      text: "Any OpenAI-compatible server works. Pick a preset, test the connection, then choose a model.",
+      cls: "setting-item-description",
+    });
+
+    let endpoint: HTMLInputElement;
+    new Setting(contentEl).setName("Provider").addDropdown((d) => {
+      PROVIDERS.forEach((p) => d.addOption(p.id, p.label));
+      d.addOption("custom", "Custom");
+      d.setValue(PROVIDERS.find((p) => p.endpoint === draft.endpoint)?.id ?? "custom");
+      d.onChange((id) => {
+        const p = PROVIDERS.find((x) => x.id === id);
+        if (!p) return;
+        Object.assign(draft, { endpoint: p.endpoint, embedEndpoint: p.embedEndpoint, embedModel: p.embedModel });
+        endpoint.value = p.endpoint;
+      });
+    });
+    new Setting(contentEl).setName("Endpoint").addText((t) => {
+      endpoint = t.inputEl;
+      t.setValue(draft.endpoint).onChange((v) => (draft.endpoint = v.trim()));
+    });
+    new Setting(contentEl)
+      .setName("API key")
+      .setDesc("Only needed for hosted providers. Stored in this plugin's data file.")
+      .addText((t) => {
+        t.inputEl.type = "password";
+        t.setValue(draft.apiKey).onChange((v) => (draft.apiKey = v.trim()));
+      });
+
+    const modelSetting = new Setting(contentEl).setName("Model").setDesc("Press Test connection to load models.");
+    const save = contentEl.createEl("button", { text: "Save", cls: "mod-cta" });
+    save.disabled = true;
+    new Setting(contentEl).addButton((b) =>
+      b.setButtonText("Test connection").onClick(async () => {
+        modelSetting.setDesc("Connecting…");
+        const found = await listModels(draft);
+        if (!found?.length) {
+          modelSetting.setDesc("Could not reach the server (check the endpoint, API key and that it is running).");
+          return;
+        }
+        models = found;
+        if (!models.includes(draft.model)) draft.model = models[0];
+        modelSetting.setDesc(`Connected. ${models.length} model${models.length === 1 ? "" : "s"} found.`);
+        modelSetting.controlEl.empty();
+        modelSetting.addDropdown((d) => {
+          models.forEach((m) => d.addOption(m, m));
+          d.setValue(draft.model).onChange((v) => (draft.model = v));
+        });
+        save.disabled = false;
+      }),
+    );
+    contentEl.appendChild(save);
+    save.onclick = () => {
+      const { endpoint: e, apiKey, model, embedEndpoint, embedModel } = draft;
+      this.onSave({ endpoint: e, apiKey, model, embedEndpoint, embedModel });
+      this.close();
+    };
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+export const RELATED_VIEW = "local-ai-related";
+
+// Side panel listing notes similar to the one you are editing.
+export class RelatedView extends ItemView {
+  private timer = 0;
+  private seq = 0;
+  private shown = "";
+  private list!: HTMLElement;
+
+  constructor(leaf: WorkspaceLeaf, private search: VaultSearch) {
+    super(leaf);
+  }
+
+  getViewType() { return RELATED_VIEW; }
+  getDisplayText() { return "Related notes"; }
+  getIcon() { return "network"; }
+
+  async onOpen() {
+    this.contentEl.empty();
+    this.contentEl.addClass("lai-related");
+    const header = this.contentEl.createDiv({ cls: "lai-header" });
+    header.createSpan({ cls: "lai-title", text: "Related notes" });
+    header.createEl("button", { text: "Refresh" }).onclick = () => void this.refresh(true);
+    this.list = this.contentEl.createDiv({ cls: "lai-log" });
+
+    const schedule = () => {
+      window.clearTimeout(this.timer);
+      this.timer = window.setTimeout(() => void this.refresh(), 700);
+    };
+    this.registerEvent(this.app.workspace.on("file-open", schedule));
+    this.registerEvent(this.app.vault.on("modify", (f) => { if (f === this.app.workspace.getActiveFile()) this.shown = ""; }));
+    schedule();
+  }
+
+  async onClose() {
+    window.clearTimeout(this.timer);
+  }
+
+  private async refresh(force = false) {
+    const file = this.app.workspace.getActiveFile();
+    if (!file || file.extension !== "md") return;
+    if (!force && file.path === this.shown) return;
+    const seq = ++this.seq;
+    this.list.empty();
+    this.list.createDiv({ cls: "lai-empty", text: "Finding related notes…" });
+    try {
+      const hits = await this.search.related(file);
+      if (seq !== this.seq) return;
+      this.shown = file.path;
+      this.list.empty();
+      if (!hits.length) this.list.createDiv({ cls: "lai-empty", text: "No related notes found." });
+      for (const h of hits) {
+        const item = this.list.createDiv({ cls: "lai-related-item" });
+        const name = h.path.replace(/\.md$/, "");
+        item.createDiv({ cls: "lai-related-name", text: name.split("/").pop() });
+        item.createDiv({ cls: "lai-related-meta", text: `${Math.round(h.score * 100)}% match · ${name}` });
+        item.onclick = (e) => void this.app.workspace.openLinkText(h.path, "", e.ctrlKey || e.metaKey);
+      }
+    } catch (e) {
+      if (seq === this.seq) {
+        this.list.empty();
+        this.list.createDiv({ cls: "lai-empty", text: `Error: ${errText(e)}` });
+      }
+    }
   }
 }
