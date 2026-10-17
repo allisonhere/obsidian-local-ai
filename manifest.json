@@ -1,0 +1,9 @@
+{
+  "id": "local-ai-assistant",
+  "name": "Local AI Assistant",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Summarize, fix grammar, rewrite and continue notes using a local llama.cpp (ridge) LLM.",
+  "author": "allie",
+  "isDesktopOnly": true
+}
