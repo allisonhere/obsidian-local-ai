@@ -17,7 +17,11 @@ const callout = (text: string) =>
 
 export const BUILTIN: Action[] = [
   { id: "summarize", name: "Summarize", mode: "below", wrap: callout,
-    system: "Summarize the text concisely in a few bullet points." + RULES },
+    system: "Summarize the text for someone who has not read it. Write a short paragraph of 2-4 sentences stating the main point or conclusion " +
+      "and the key facts, decisions, numbers and names. Only add a few bullets after it if the text has distinct items worth listing " +
+      "(steps, action items, options); never turn the whole summary into bullets. " +
+      "Be specific and use the text's own terms; don't describe the text ('this note discusses...') or add anything it doesn't say. " +
+      "Scale length to the input: very short text gets a sentence or two." + RULES },
   { id: "grammar", name: "Fix grammar and spelling", mode: "replace",
     system: "Fix grammar, spelling and punctuation. Do not change wording, tone or meaning beyond that." + RULES },
   { id: "shorter", name: "Rewrite shorter", mode: "replace",

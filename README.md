@@ -189,7 +189,7 @@ Summaries are added as a callout:
 
 | Action | What it does |
 | --- | --- |
-| Summarize | A few bullet points, added below as a callout |
+| Summarize | A short paragraph (plus bullets only when the text has real list items), added below as a callout |
 | Fix grammar and spelling | Corrects errors without changing your wording |
 | Rewrite shorter / more formal / more casual | Replaces the text with a rewrite |
 | Continue writing | Adds a continuation in the same voice |
