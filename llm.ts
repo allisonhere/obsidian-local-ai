@@ -8,6 +8,8 @@ export interface LLMSettings {
   // Bearer token for cloud providers; empty for local servers.
   apiKey: string;
   model: string;
+  // Endpoint → last model chosen, so switching providers restores the right model.
+  modelByEndpoint?: Record<string, string>;
   // Let the model reason before answering: better on hard questions, slower to first token.
   thinking: boolean;
   temperature: number;
@@ -17,9 +19,28 @@ export interface LLMSettings {
   embedModel: string;
 }
 
+export interface ToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
+export interface ToolSpec {
+  type: "function";
+  function: { name: string; description: string; parameters: Record<string, unknown> };
+}
+
+export interface StreamChunk {
+  content?: string;        // one content delta
+  toolCalls?: ToolCall[];  // assembled tool calls, emitted once at end of stream
+  finishReason?: string;
+}
+
 export interface Message {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  tool_calls?: ToolCall[];
+  tool_call_id?: string;
 }
 
 // Node http rather than fetch: the servers send no CORS headers for Obsidian's app:// origin.
@@ -47,12 +68,13 @@ async function readAll(res: IncomingMessage): Promise<string> {
 
 // OpenAI-compatible streaming. Reasoning tokens arrive in delta.reasoning_content and are
 // ignored; only delta.content is the answer.
-export async function* streamChat(s: LLMSettings, messages: Message[], signal: AbortSignal) {
+export async function* streamChat(s: LLMSettings, messages: Message[], signal: AbortSignal, tools?: ToolSpec[]): AsyncGenerator<StreamChunk> {
   const res = await post(s.endpoint, "/v1/chat/completions", {
     model: s.model,
     stream: true,
     messages,
     temperature: s.temperature,
+    ...(tools && tools.length && { tools, tool_choice: "auto" }),
     // llama.cpp-style template switch; hosted APIs reject unknown fields, so only send it to http servers.
     ...(!s.endpoint.startsWith("https:") && { chat_template_kwargs: { enable_thinking: s.thinking } }),
   }, s.apiKey, signal);
@@ -60,6 +82,8 @@ export async function* streamChat(s: LLMSettings, messages: Message[], signal: A
 
   res.setEncoding("utf8");
   let buf = "";
+  const calls = new Map<number, { id: string; name: string; args: string }>();
+  let finishReason: string | undefined;
   for await (const chunk of res) {
     buf += chunk;
     let nl: number;
@@ -68,12 +92,32 @@ export async function* streamChat(s: LLMSettings, messages: Message[], signal: A
       buf = buf.slice(nl + 1);
       if (!line.startsWith("data:")) continue;
       const data = line.slice(5).trim();
-      if (data === "[DONE]") return;
+      if (data === "[DONE]") continue;
       const msg = JSON.parse(data);
       if (msg.error) throw new Error(msg.error.message ?? String(msg.error));
-      const text = msg.choices?.[0]?.delta?.content;
-      if (text) yield text as string;
+      const choice = msg.choices?.[0];
+      if (choice?.finish_reason) finishReason = choice.finish_reason;
+      const text = choice?.delta?.content;
+      if (text) yield { content: text as string };
+      for (const tc of choice?.delta?.tool_calls ?? []) {
+        const idx = tc.index;
+        let acc = calls.get(idx);
+        if (!acc) { acc = { id: tc.id ?? "", name: "", args: "" }; calls.set(idx, acc); }
+        if (tc.id) acc.id = tc.id;
+        if (tc.function?.name) acc.name = tc.function.name;
+        if (tc.function?.arguments) acc.args += tc.function.arguments;
+      }
     }
+  }
+  if (calls.size) {
+    const toolCalls: ToolCall[] = [...calls.entries()].sort((a, b) => a[0] - b[0]).map(([, c]) => ({
+      id: c.id,
+      type: "function",
+      function: { name: c.name, arguments: c.args },
+    }));
+    yield { toolCalls, finishReason };
+  } else if (finishReason) {
+    yield { finishReason };
   }
 }
 

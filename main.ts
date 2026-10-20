@@ -1,6 +1,7 @@
 import {
   App,
   Editor,
+  EditorPosition,
   Notice,
   Plugin,
   normalizePath,
@@ -10,12 +11,15 @@ import {
 } from "obsidian";
 import { ASK_NOTE, Action, BUILTIN, LANGUAGES, RULES, expandVars, translateTo } from "./actions";
 import { LLMSettings, Message, listModels, streamChat } from "./llm";
-import { CHAT_VIEW, ChatView, Picker, PromptModal, RELATED_VIEW, RelatedView, ResultModal, SetupModal } from "./ui";
+import { CHAT_VIEW, ChatView, DiffModal, Picker, PromptModal, RELATED_VIEW, RelatedView, ResultModal, SetupModal } from "./ui";
 import { VaultSearch, askVault, digestMessages } from "./vault";
 
 interface Settings extends LLMSettings {
   // Stream results straight into the note instead of previewing them in a modal (undo with Ctrl+Z).
   applyDirectly: boolean;
+  confirmEdits: boolean;
+  wholeNote: boolean;
+  modelByEndpoint?: Record<string, string>;
   customActions: string;
   // Vault folder whose notes are reusable prompts (note body = instruction).
   promptFolder: string;
@@ -34,6 +38,8 @@ const DEFAULTS: Settings = {
   embedEndpoint: "http://127.0.0.1:1234",
   embedModel: "text-embedding-nomic-embed-text-v1.5",
   applyDirectly: false,
+  confirmEdits: false,
+  wholeNote: false,
   customActions: "",
   promptFolder: "AI Prompts",
   setupDone: false,
@@ -57,6 +63,7 @@ export default class LocalAIPlugin extends Plugin {
       new ChatView(leaf, {
         settings: this.settings,
         history: this.settings.chat,
+        search: (q) => this.search.search(q),
         save: () => this.saveData(this.settings),
       }));
     this.registerView(RELATED_VIEW, (leaf) => new RelatedView(leaf, this.search));
@@ -137,8 +144,7 @@ export default class LocalAIPlugin extends Plugin {
       const models = await listModels(this.settings);
       if (!models) return void new Notice("Loom server unreachable.");
       new Picker(this.app, models, (m) => m, "Switch model…", async (m) => {
-        this.settings.model = m;
-        await this.saveData(this.settings);
+        await this.rememberModel(m);
         void refresh();
       }).open();
     };
@@ -182,9 +188,20 @@ export default class LocalAIPlugin extends Plugin {
   private openSetup() {
     new SetupModal(this.app, this.settings, async (patch) => {
       Object.assign(this.settings, patch, { setupDone: true });
+      this.restoreModel(this.settings.endpoint);
       await this.saveData(this.settings);
       new Notice("Loom connected.");
     }).open();
+  }
+
+  private rememberModel(model: string) {
+    this.settings.model = model;
+    (this.settings.modelByEndpoint ??= {})[this.settings.endpoint] = model;
+    return this.saveData(this.settings);
+  }
+  private restoreModel(endpoint: string) {
+    const m = this.settings.modelByEndpoint?.[endpoint];
+    if (m) this.settings.model = m;
   }
 
   // Custom actions live in settings as "Name: instruction" lines, so edits apply without a reload.
@@ -251,13 +268,14 @@ export default class LocalAIPlugin extends Plugin {
   // With nothing selected the whole note is the input (and, for "replace", the target).
   private run(editor: Editor, action: Action, question?: string) {
     const selection = editor.getSelection();
-    const input = selection || editor.getValue();
+    const useWhole = this.settings.wholeNote || !selection;
+    const input = useWhole ? editor.getValue() : selection;
     if (!input.trim()) {
       new Notice("Nothing to process.");
       return;
     }
-    const from = selection ? editor.getCursor("from") : { line: 0, ch: 0 };
-    const to = selection ? editor.getCursor("to") : editor.offsetToPos(editor.getValue().length);
+    const from = useWhole ? { line: 0, ch: 0 } : editor.getCursor("from");
+    const to = useWhole ? editor.offsetToPos(editor.getValue().length) : editor.getCursor("to");
 
     const { text: system, usedInput } = expandVars(
       typeof action.system === "function" ? action.system(this.app) : action.system,
@@ -279,6 +297,10 @@ export default class LocalAIPlugin extends Plugin {
     };
     const start = action.mode === "replace" ? from : to;
 
+    if (this.settings.confirmEdits && action.mode === "replace") {
+      void this.previewEdit(editor, action.name, messages, start, to, format);
+      return;
+    }
     if (this.settings.applyDirectly) {
       void this.stream(editor, messages, editor.posToOffset(start), editor.posToOffset(to), format);
       return;
@@ -302,7 +324,8 @@ export default class LocalAIPlugin extends Plugin {
     let text = "";
     try {
       for await (const chunk of streamChat(this.settings, messages, ctrl.signal)) {
-        text += chunk;
+        if (!chunk.content) continue;
+        text += chunk.content;
         const out = format(text.trim());
         editor.replaceRange(out, editor.offsetToPos(start), editor.offsetToPos(end));
         end = start + out.length;
@@ -313,6 +336,27 @@ export default class LocalAIPlugin extends Plugin {
       notice.hide();
       if (this.streaming === ctrl) this.streaming = null;
     }
+  }
+
+  private async previewEdit(editor: Editor, title: string, messages: Message[], start: EditorPosition, to: EditorPosition, format: (t: string) => string) {
+    const ctrl = new AbortController();
+    const notice = new Notice("Generating…", 0);
+    let text = "";
+    try {
+      for await (const chunk of streamChat(this.settings, messages, ctrl.signal)) {
+        if (chunk.content) text += chunk.content;
+      }
+    } catch (e) {
+      notice.hide();
+      new Notice(`Error: ${errText(e)}`);
+      return;
+    }
+    notice.hide();
+    const result = format(text.trim());
+    if (!result) return;
+    new DiffModal(this.app, title, editor.getRange(start, to), result, (apply) => {
+      if (apply) editor.replaceRange(result, start, to);
+    }).open();
   }
 }
 
@@ -341,7 +385,7 @@ class SettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("LLM endpoint")
       .setDesc("Any OpenAI-compatible server.")
-      .addText((t) => t.setValue(s.endpoint).onChange(async (v) => { s.endpoint = v.trim(); await save(); }))
+      .addText((t) => t.setValue(s.endpoint).onChange(async (v) => { s.endpoint = v.trim(); const m = s.modelByEndpoint?.[s.endpoint]; if (m) s.model = m; await save(); }))
       .addButton((b) => b.setButtonText("Refresh models").onClick(() => this.display()));
 
     new Setting(containerEl)
@@ -359,7 +403,7 @@ class SettingsTab extends PluginSettingTab {
       if (!models.includes(s.model)) models.unshift(s.model);
       model.addDropdown((d) => {
         models.forEach((m) => d.addOption(m, m));
-        d.setValue(s.model).onChange(async (v) => { s.model = v; await save(); });
+        d.setValue(s.model).onChange(async (v) => { s.model = v; (s.modelByEndpoint ??= {})[s.endpoint] = v; await save(); });
       });
     } else {
       model.setDesc("Could not list models from the server; enter a name manually.");
@@ -390,6 +434,16 @@ class SettingsTab extends PluginSettingTab {
       .setName("Apply results directly")
       .setDesc("Stream results into the note without a preview window. Ctrl+Z undoes them.")
       .addToggle((t) => t.setValue(s.applyDirectly).onChange(async (v) => { s.applyDirectly = v; await save(); }));
+
+    new Setting(containerEl)
+      .setName("Confirm edits before writing")
+      .setDesc("Show a diff before replace-style actions write into the note.")
+      .addToggle((t) => t.setValue(s.confirmEdits).onChange(async (v) => { s.confirmEdits = v; await save(); }));
+
+    new Setting(containerEl)
+      .setName("Whole note as input")
+      .setDesc("Always use the whole note, even when text is selected.")
+      .addToggle((t) => t.setValue(s.wholeNote).onChange(async (v) => { s.wholeNote = v; await save(); }));
 
     new Setting(containerEl)
       .setName("Embedding endpoint")

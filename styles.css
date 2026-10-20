@@ -42,3 +42,12 @@
 .lai-related-meta { font-size:var(--font-ui-smaller); color:var(--text-faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .lai-ok { color:var(--color-green); }
 .lai-error { color:var(--color-red); }
+.lai-review { border:1px solid var(--background-modifier-border); border-radius:var(--radius-m); background:var(--background-secondary); padding:var(--size-4-3); display:flex; flex-direction:column; gap:var(--size-4-2); }
+.lai-review-title { font-weight:var(--font-semibold); }
+.lai-review-item { border-top:1px solid var(--background-modifier-border); padding-top:var(--size-4-2); display:flex; flex-direction:column; gap:4px; }
+.lai-review-item:first-of-type { border-top:none; }
+.lai-review-path { font-family:var(--font-monospace); font-size:var(--font-ui-smaller); color:var(--text-muted); }
+.lai-diff { margin:0; white-space:pre-wrap; font-size:var(--font-ui-smaller); max-height:16em; overflow:auto; }
+.lai-diff-add { color:var(--color-green); }
+.lai-diff-del { color:var(--color-red); }
+.lai-review-actions { display:flex; gap:var(--size-4-2); justify-content:flex-end; }

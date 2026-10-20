@@ -1,6 +1,7 @@
 import { App, FuzzySuggestModal, ItemView, MarkdownRenderer, MarkdownView, Modal, Notice, Setting, TFile, WorkspaceLeaf } from "obsidian";
-import { LLMSettings, Message, PROVIDERS, listModels, streamChat } from "./llm";
+import { LLMSettings, Message, PROVIDERS, listModels, streamChat, ToolCall, StreamChunk } from "./llm";
 import type { VaultSearch } from "./vault";
+import { TOOL_SPECS, executeTool, applyWrites, diffLines, PendingWrite } from "./tools";
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -100,9 +101,7 @@ export class ResultModal extends Modal {
     this.out.setText("Waiting for model…");
     try {
       for await (const chunk of streamChat(this.settings, this.messages, signal)) {
-        this.text += chunk;
-        this.out.setText(this.text);
-        this.out.scrollTop = this.out.scrollHeight;
+        if (chunk.content) { this.text += chunk.content; this.out.setText(this.text); this.out.scrollTop = this.out.scrollHeight; }
       }
       this.text = this.text.trim();
       if (!this.text) throw new Error("Model returned no text.");
@@ -122,12 +121,32 @@ export class ResultModal extends Modal {
   }
 }
 
+export class DiffModal extends Modal {
+  constructor(app: App, private title: string, private before: string, private after: string, private onApply: (apply: boolean) => void) {
+    super(app);
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("h3", { text: this.title });
+    const pre = contentEl.createEl("pre", { cls: "lai-diff" });
+    for (const l of diffLines(this.before, this.after)) {
+      if (l.op === "same") continue;
+      pre.createDiv({ cls: `lai-diff-${l.op}`, text: (l.op === "add" ? "+ " : "- ") + l.text });
+    }
+    const buttons = contentEl.createDiv({ cls: "lai-review-actions" });
+    buttons.createEl("button", { text: "Apply", cls: "mod-cta" }).onclick = () => { this.close(); this.onApply(true); };
+    buttons.createEl("button", { text: "Cancel" }).onclick = () => { this.close(); this.onApply(false); };
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
 export const CHAT_VIEW = "loom-chat";
 
 // What the chat needs from the plugin: live settings plus a persisted conversation.
 export interface ChatHost {
   settings: LLMSettings;
   history: Message[];
+  search: (q: string) => Promise<{ path: string; text: string }[]>;
   save(): Promise<void>;
 }
 
@@ -163,6 +182,7 @@ export class ChatView extends ItemView {
     void this.fillModels(models);
     models.onchange = () => {
       this.host.settings.model = models.value;
+      (this.host.settings.modelByEndpoint ??= {})[this.host.settings.endpoint] = models.value;
       void this.host.save();
     };
     header.createEl("button", { text: "Save", attr: { "aria-label": "Save chat as a note" } }).onclick = () => void this.saveAsNote();
@@ -304,8 +324,13 @@ export class ChatView extends ItemView {
     if (!question || this.abort) return;
     this.input.value = "";
 
-    const { history, settings } = this.host;
-    const system = (settings.systemPrompt || "You are a helpful assistant inside Obsidian.") + (await this.context());
+    const { history, settings, search } = this.host;
+    const pending: PendingWrite[] = [];
+
+    const system = (settings.systemPrompt || "You are a helpful assistant inside Obsidian.")
+      + (await this.context())
+      + (await this.relatedContext(question));
+
     const userMsg: Message = { role: "user", content: question };
     this.bubble("user", question);
     const body = this.bubble("assistant", "");
@@ -316,12 +341,28 @@ export class ChatView extends ItemView {
     const t0 = Date.now();
     let tokens = 0;
     let answer = "";
+
+    const messages: Message[] = [{ role: "system", content: system }, ...history, userMsg];
     try {
-      for await (const chunk of streamChat(settings, [{ role: "system", content: system }, ...history, userMsg], ctrl.signal)) {
-        answer += chunk;
-        tokens++;
-        body.setText(answer);
-        this.log.scrollTop = this.log.scrollHeight;
+      for (let turn = 0; turn < 8; turn++) {
+        const toolCalls: ToolCall[] = [];
+        answer = "";
+        for await (const chunk of streamChat(settings, messages, ctrl.signal, TOOL_SPECS)) {
+          if (chunk.content) {
+            answer += chunk.content;
+            tokens++;
+            body.setText(answer);
+            this.log.scrollTop = this.log.scrollHeight;
+          }
+          if (chunk.toolCalls) toolCalls.push(...chunk.toolCalls);
+        }
+        if (!toolCalls.length) break;
+        messages.push({ role: "assistant", content: answer || "", tool_calls: toolCalls });
+        for (const call of toolCalls) {
+          const result = await executeTool(this.app, search, call, (w) => pending.push(w));
+          messages.push({ role: "tool", tool_call_id: call.id, content: result });
+        }
+        body.setText(toolCalls.length === 1 ? `…${toolCalls[0].function.name}…` : `…${toolCalls.length} tool calls…`);
       }
     } catch (e) {
       if (!ctrl.signal.aborted) {
@@ -341,6 +382,53 @@ export class ChatView extends ItemView {
     await this.renderHistory();
     const secs = (Date.now() - t0) / 1000;
     this.log.querySelector(".lai-msg:last-child .lai-meta")?.createSpan({ text: `${tokens} tokens · ${(tokens / secs).toFixed(1)} tok/s` });
+    this.renderReview(pending);
+  }
+
+  // Feature 2: prepend the most relevant note excerpts to the chat context.
+  private async relatedContext(question: string): Promise<string> {
+    try {
+      const hits = await this.host.search(question);
+      if (!hits.length) return "";
+      const active = this.includeCurrent ? this.app.workspace.getActiveFile() : null;
+      const seen = new Set([...(active ? [active.path] : []), ...this.attached.map((f) => f.path)].map((p) => p.toLowerCase()));
+      const top = hits.filter((h) => !seen.has(h.path.toLowerCase())).slice(0, 3);
+      if (!top.length) return "";
+      return "\n\nNotes that may be relevant (excerpts):\n" + top.map((h) => `- [[${h.path.replace(/\.md$/, "")}]]\n${h.text}`).join("\n\n");
+    } catch {
+      return ""; // no embedding server, or search failed — degrade gracefully
+    }
+  }
+
+  // Render queued write changes as a diff with Apply / Discard buttons.
+  private renderReview(writes: PendingWrite[]) {
+    if (!writes.length) return;
+    const box = this.log.createDiv({ cls: "lai-review" });
+    box.createDiv({ cls: "lai-review-title", text: `Review ${writes.length} change${writes.length === 1 ? "" : "s"} before writing` });
+    for (const w of writes) {
+      const item = box.createDiv({ cls: "lai-review-item" });
+      item.createDiv({ cls: "lai-review-path", text: `${w.kind === "create" ? "Create" : "Update"} ${w.path}` });
+      const lines = diffLines(w.previous, w.content);
+      const pre = item.createEl("pre", { cls: "lai-diff" });
+      if (lines.length > 400) {
+        const add = lines.filter((l) => l.op === "add").length;
+        const del = lines.filter((l) => l.op === "del").length;
+        pre.createDiv({ text: `Large change: ${del} lines removed, ${add} lines added.` });
+      } else {
+        for (const l of lines) {
+          if (l.op === "same") continue;
+          pre.createDiv({ cls: `lai-diff-${l.op}`, text: (l.op === "add" ? "+ " : "- ") + l.text });
+        }
+      }
+    }
+    const actions = box.createDiv({ cls: "lai-review-actions" });
+    actions.createEl("button", { text: "Apply", cls: "mod-cta" }).onclick = () => {
+      void applyWrites(this.app, writes).then(() => {
+        box.remove();
+        new Notice(`Wrote ${writes.length} note${writes.length === 1 ? "" : "s"}.`);
+      });
+    };
+    actions.createEl("button", { text: "Discard" }).onclick = () => box.remove();
   }
 
   private async saveAsNote() {
